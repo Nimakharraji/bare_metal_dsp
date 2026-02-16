@@ -1,45 +1,36 @@
-Markdown
-# BARE-METAL DSP ENGINE 
+# ⚡ BARE-METAL DSP: X64 AUDIO HARNESS
 
-A high-performance, zero-latency Digital Signal Processing (DSP) engine bridging a hardcore C++ audio backend with a Flutter/Dart control plane via Foreign Function Interface (FFI).
+> **High-Performance Audio Intelligence via C++ / Flutter Hybrid Architecture.**
 
-## Architectural Overview
-This system completely bypasses standard high-level audio plugins. It captures raw audio directly from the hardware ADC using OS-level APIs (WASAPI on Windows via `miniaudio`) on a dedicated high-priority hardware thread. 
+This is not a standard audio plugin. This engine operates at the kernel level of Windows WASAPI, bypassing high-level framework latencies to deliver raw, real-time spectral analysis.
 
-The Flutter UI strictly acts as a passive Control Plane, operating completely independent of the DSP thread. Memory synchronization is handled via lock-free atomic pointers.
+---
 
-### Core Features
-* **Zero-Latency Audio Capture:** Direct hardware interfacing without framework overhead.
-* **IIR Filtering (DC Blocker):** Hardware-level removal of ADC DC offsets.
-* **Real-time FFT:** Radix-2 Cooley-Tukey algorithm executing $O(N \log N)$ running directly on the raw memory buffer.
-* **End-to-End Telemetry:** 60fps UI synchronization rendering dBFS Master Meters and a 512-bin Spectrum Analyzer without blocking the audio thread.
+### 🛠 ENGINEERING SPECS
+* **Low-Level Backend:** Pure C++17 with `miniaudio` integration for direct hardware ADC access.
+* **Mathematical Core:** In-place **Radix-2 Cooley-Tukey FFT** ($1024$ samples) for ultra-fast frequency decomposition.
+* **Zero-Latency Logic:** Lock-free atomic synchronization between the hardware thread and the UI isolate.
+* **FFI Bridge:** Direct Memory Access (DMA) casting for high-speed telemetry.
 
-## Directory Structure
-```text
-.
-├── lib/               # Dart Control Plane & BLoC Architecture
-├── src/               # The Muscle: Native C++ Engine & Mathematics
-│   ├── engine.cpp     # Lock-free DSP Loop and WASAPI callbacks
-│   ├── engine.h       # FFI Contract and Memory Layout
-│   └── CMakeLists.txt # High-performance MSVC Compiler Directives (/O2, /fp:fast)
-└── windows/           # Flutter Build Runner and CMake integration
-Build Instructions (Windows x64)
-To compile the hybrid environment, ensure you have MSVC, CMake, and Ninja correctly configured in your PATH.
+### 📊 VISUAL TELEMETRY
+The UI utilizes a specialized **Spectrum Analyzer** and **dBFS Master Meter** with a -60dB to 0dB range, utilizing a logarithmic mapping to match human auditory perception.
 
-1. Fetch Dependencies
+### 🚀 PERFORMANCE
+* **Sampling Rate:** $48.0 \text{ kHz}$ (Professional Standard)
+* **Buffer Resolution:** $1024$ Samples
+* **FFT Bins:** $512$ Individual Frequency Bands
+* **UI Sync:** Locked @ $60 \text{ FPS}$
 
-Bash
-flutter pub get
-2. Compile & Run (Debug - Unoptimized for UI inspection)
+---
 
-Bash
-flutter run -d windows
-3. Compile & Run (Release - Maximum C++ Optimization)
-Crucial for testing actual DSP CPU loads.
+## 🏗 SYSTEM SETUP
 
-Bash
+### **Compiler Requirements**
+- **MSVC** (Visual Studio 2022 Build Tools)
+- **CMake** 3.14+
+- **Flutter** 3.7.0+
+
+### **Production Build**
+To trigger maximum compiler optimizations (`/O2`, `/fp:fast`):
+```bash
 flutter run -d windows --release
-Engineering Constraints
-The src/ directory strictly forbids dynamic memory allocation (new/malloc) or OS-level locking mechanisms (mutex) inside the processAudio critical path to prevent audio dropouts.
-
-UI elements read from the native pointers using Direct Memory Access (DMA) casting.
