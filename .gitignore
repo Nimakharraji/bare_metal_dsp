@@ -1,0 +1,59 @@
+# ==========================================
+# BAREMETAL DSP - UNIFIED GITIGNORE
+# ==========================================
+
+# --- Flutter / Dart / Pub ---
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+
+# --- C++ / MSVC / CMake Artifacts ---
+*.obj
+*.o
+*.ilk
+*.meta
+*.pdb
+*.exp
+*.lib
+*.dll
+*.exe
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.vs/
+out/
+
+# --- IDEs / Editors ---
+.idea/
+*.iml
+*.ipr
+*.iws
+*.swp
+.vscode/
+
+# --- OS / Misc ---
+.DS_Store
+*.class
+*.log
+*.pyc
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# Symbolication & Obfuscation
+app.*.symbols
+app.*.map.json
+
+# Android Studio Artifacts
+android/app/debug
+android/app/profile
+android/app/release
