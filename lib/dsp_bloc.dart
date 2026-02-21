@@ -10,7 +10,7 @@ class DspState {
   final List<double> fftData; // 512 frequency bins
   final double mediaTime;     // Sample-accurate clock from C++
   final String subtitleText;  // Current active subtitle
-  final double masterGain;    // current gain (0.0 - 1.0)
+  final double masterGain;    // Current gain (0.0 - 1.0)
 
   const DspState({
     required this.isRunning,
@@ -74,37 +74,47 @@ class DspBloc extends Bloc<DspEvent, DspState> {
 
   void _onToggleEngine(ToggleEngine event, Emitter<DspState> emit) {
     if (state.isRunning) {
+      // Stop logic
       _bridge.stopEngine();
       _telemetryTimer?.cancel();
       emit(DspState.initial());
     } else {
-      _bridge.initEngine();
+      // --- STARTUP LOGIC: MODE 1 (PLAYBACK) ---
       
-      // --- INJECT TEST SUBTITLES (For Debugging) ---
-      // This loads directly into C++ std::vector memory
+
+      // Windows Example: "C:\\Music\\track.mp3"
+      final String testFilePath = "C:\\Users\\RSKALA\\Downloads\\example222.mp3"; 
+
+      // Initialize Engine in Mode 1 (Playback)
+      // This will decode the file, play it to speakers, and analyze it.
+      _bridge.initEngine(mode: 1, filePath: testFilePath);
+      
+      // --- INJECT SYNC TEST SUBTITLES ---
+      // These timestamps will match the audio file's playback time
       const mockSrt = """
 1
-00:00:01,000 --> 00:00:03,500
-SYSTEM INITIALIZED
-ACCESSING AUDIO HARDWARE...
+00:00:01,000 --> 00:00:04,000
+MODE 1: PLAYBACK ACTIVE
+DECODING AUDIO FILE...
 
 2
-00:00:03,600 --> 00:00:06,000
-SAMPLE-ACCURATE CLOCK
-SYNCED TO AUDIO FRAME COUNT
+00:00:04,500 --> 00:00:08,000
+SYNCING SUBTITLES TO MUSIC
+SAMPLE-ACCURATE TIMING
 
 3
-00:00:06,100 --> 00:00:09,000
-FAST FOURIER TRANSFORM
-RADIX-2 ALGORITHM ACTIVE
+00:00:08,500 --> 00:00:12,000
+BARE-METAL DSP ENGINE
+READY FOR IOS DEPLOYMENT
 """;
       _bridge.loadSubtitles(mockSrt);
-      // ---------------------------------------------
+      // -----------------------------
 
-      // 60 FPS Telemetry Loop (approx 16ms)
+      // Start Telemetry Loop (60 FPS / ~16ms)
       _telemetryTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
         add(_UpdateTelemetry());
       });
+      
       emit(state.copyWith(isRunning: true));
     }
   }
@@ -117,24 +127,22 @@ RADIX-2 ALGORITHM ACTIVE
   void _onUpdateTelemetry(_UpdateTelemetry event, Emitter<DspState> emit) {
     if (!state.isRunning) return;
 
-    // 1. Fetch RMS (Atomic Read)
+    // 1. Fetch RMS Level
     final double level = _bridge.getRmsLevel();
     
-    // 2. Fetch Time (Calculated from total_frames / sample_rate)
+    // 2. Fetch Media Time (Driven by Audio Samples)
     final double time = _bridge.getMediaTime();
 
     // 3. Fetch FFT Data (Direct Pointer Access)
     final ffi.Pointer<ffi.Float> ptr = _bridge.getFftArray();
-    List<double> currentFft = state.fftData; // Keep old data if null
+    List<double> currentFft = state.fftData; 
+    
     if (ptr != ffi.nullptr) {
-      // Zero-Copy view would be unsafe in Dart if C++ frees memory, 
-      // so we do a fast copy.
+      // Fast copy from C heap to Dart heap for rendering
       currentFft = List<double>.from(ptr.asTypedList(512));
     }
 
-    // 4. Fetch Subtitles
-    // Optimization: We could check getSubtitleIndex() first to see if it changed,
-    // but FFI string copy is negligible for short text.
+    // 4. Fetch Subtitles (Synced to Media Time)
     final int subIdx = _bridge.getSubtitleIndex();
     String currentSub = "";
     if (subIdx != -1) {

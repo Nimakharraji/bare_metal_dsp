@@ -6,9 +6,9 @@
 #include <string>
 #include <cstdint>
 
-// Forward Declaration:
-// به کامپایلر میگیم "یه چیزی به اسم ma_device وجود داره، نگران جزئیاتش نباش فعلاً".
+// Forward Declarations
 struct ma_device;
+struct ma_decoder; // اضافه شده برای خواندن فایل
 
 #if defined(_WIN32)
     #define EXPORT extern "C" __declspec(dllexport)
@@ -19,6 +19,13 @@ struct ma_device;
 #define FFT_SIZE 1024
 #define FFT_BINS (FFT_SIZE / 2)
 #define SAMPLE_RATE 48000
+
+// حالت‌های موتور
+enum class EngineMode {
+    IDLE = -1,
+    CAPTURE = 0, // میکروفون (Visualizer)
+    PLAYBACK = 1 // پخش فایل (Video Player Sync)
+};
 
 struct SubtitleEvent {
     double startTime;
@@ -31,53 +38,52 @@ public:
     DSPEngine();
     ~DSPEngine();
 
-    void start();
+    // تغییر: حالا init مد و مسیر فایل رو میگیره
+    void start(int mode, const char* filePath = nullptr);
     void stop();
 
-    // --- Telemetry ---
     float getRms();
     float* getFftData();
-    double getCurrentTime() const;
+    double getCurrentTime() const; // Works for both Mic and File
 
-    // --- Media Control ---
     void setMasterGain(float gain);
     void loadSubtitles(const char* srtContent);
     int32_t getActiveSubtitleIndex() const;
     const char* getSubtitleText(int32_t index) const;
 
-    // --- Core Processing ---
-    void processAudio(float* inputBuffer, uint32_t frameCount);
+    // متدی که Miniaudio صدا میزنه
+    void onAudioData(void* pOutput, const void* pInput, uint32_t frameCount);
 
 private:
     std::atomic<bool> isRunning;
-    
-    // Opaque Pointer: ما اینجا فقط پوینتر رو نگه میداریم.
+    EngineMode currentMode;
+
     ma_device* device;
+    ma_decoder* decoder; // دیکدر فایل صوتی
 
     std::atomic<uint64_t> totalFramesProcessed;
     std::atomic<float> masterGain;
     std::atomic<float> currentRms;
 
-    // Subtitle Logic
     std::vector<SubtitleEvent> subtitles;
     std::atomic<int32_t> currentSubtitleIdx;
 
-    // DSP States
     float prevInput;
     float prevOutput;
     const float R = 0.995f;
 
-    // FFT Memory
     float sampleBuffer[FFT_SIZE];
     int bufferIndex;
     float fftMagnitudes[FFT_BINS];
 
     void computeFFT();
     void syncSubtitles(double timestamp);
+    void processSignal(const float* buffer, uint32_t frames);
 };
 
-// --- C-ABI Exports ---
-EXPORT void init_engine();
+// --- FFI Exports ---
+// تغییر: ورودی‌های جدید برای init
+EXPORT void init_engine(int mode, const char* file_path);
 EXPORT void stop_engine();
 EXPORT float get_rms_level();
 EXPORT float* get_fft_array();

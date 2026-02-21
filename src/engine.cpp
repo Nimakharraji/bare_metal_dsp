@@ -1,17 +1,15 @@
-// CRITICAL: This macro must be defined ONLY ONCE in the entire project.
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
-
 #include "engine.h"
 #include <cmath>
 #include <complex>
 #include <algorithm>
 #include <sstream>
+#include <cstring> // For memset
 
 const float PI = 3.14159265358979323846f;
 static DSPEngine* global_engine = nullptr;
 
-// --- Helper Functions ---
 double parseTimestamp(const std::string& timestamp) {
     int h, m, s, ms;
     char sep;
@@ -20,20 +18,17 @@ double parseTimestamp(const std::string& timestamp) {
     return (h * 3600.0) + (m * 60.0) + s + (ms / 1000.0);
 }
 
+// Global Callback Wrapper
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    if (pDevice->pUserData != nullptr && pInput != nullptr) {
+    if (pDevice->pUserData != nullptr) {
         DSPEngine* engine = static_cast<DSPEngine*>(pDevice->pUserData);
-        // Cast away const specifically for processing logic
-        engine->processAudio(const_cast<float*>(static_cast<const float*>(pInput)), frameCount);
+        engine->onAudioData(pOutput, pInput, frameCount);
     }
-    (void)pOutput;
 }
 
-// --- Class Implementation ---
-
 DSPEngine::DSPEngine() : 
-    isRunning(false), device(nullptr), totalFramesProcessed(0),
-    masterGain(1.0f), currentRms(0.0f), currentSubtitleIdx(-1),
+    isRunning(false), currentMode(EngineMode::IDLE), device(nullptr), decoder(nullptr),
+    totalFramesProcessed(0), masterGain(1.0f), currentRms(0.0f), currentSubtitleIdx(-1),
     prevInput(0.0f), prevOutput(0.0f), bufferIndex(0) 
 {
     std::fill_n(sampleBuffer, FFT_SIZE, 0.0f);
@@ -44,21 +39,43 @@ DSPEngine::~DSPEngine() {
     stop();
 }
 
-void DSPEngine::start() {
+void DSPEngine::start(int mode, const char* filePath) {
     if (isRunning.load()) return;
+
+    currentMode = (mode == 1) ? EngineMode::PLAYBACK : EngineMode::CAPTURE;
     
-    device = new ma_device();
-    ma_device_config config = ma_device_config_init(ma_device_type_capture);
-    config.capture.format = ma_format_f32;
-    config.capture.channels = 1;
+    ma_device_config config;
+    
+    if (currentMode == EngineMode::PLAYBACK) {
+        // --- Setup Playback (File) ---
+        if (!filePath) return;
+
+        decoder = new ma_decoder();
+        ma_decoder_config decConfig = ma_decoder_config_init(ma_format_f32, 1, SAMPLE_RATE);
+        
+        if (ma_decoder_init_file(filePath, &decConfig, decoder) != MA_SUCCESS) {
+            delete decoder; decoder = nullptr; return;
+        }
+
+        config = ma_device_config_init(ma_device_type_playback);
+        config.playback.format   = ma_format_f32;
+        config.playback.channels = 1; 
+    } else {
+        // --- Setup Capture (Mic) ---
+        config = ma_device_config_init(ma_device_type_capture);
+        config.capture.format    = ma_format_f32;
+        config.capture.channels  = 1;
+    }
+
     config.sampleRate = SAMPLE_RATE;
     config.dataCallback = data_callback;
     config.pUserData = this;
-    config.periodSizeInFrames = 256; // Low latency
+    config.periodSizeInFrames = 256; 
 
+    device = new ma_device();
     if (ma_device_init(NULL, &config, device) != MA_SUCCESS) {
-        delete device;
-        device = nullptr;
+        if (decoder) { ma_decoder_uninit(decoder); delete decoder; decoder = nullptr; }
+        delete device; device = nullptr;
         return;
     }
 
@@ -71,33 +88,76 @@ void DSPEngine::stop() {
     if (isRunning.load()) {
         if (device) {
             ma_device_uninit(device);
-            delete device;
-            device = nullptr;
+            delete device; device = nullptr;
+        }
+        if (decoder) {
+            ma_decoder_uninit(decoder);
+            delete decoder; decoder = nullptr;
         }
         isRunning.store(false);
         totalFramesProcessed.store(0);
+        currentMode = EngineMode::IDLE;
     }
 }
 
-// --- Getters / Setters ---
-float DSPEngine::getRms() { return currentRms.load(std::memory_order_relaxed); }
-float* DSPEngine::getFftData() { return fftMagnitudes; }
-double DSPEngine::getCurrentTime() const { 
-    return (double)totalFramesProcessed.load(std::memory_order_relaxed) / (double)SAMPLE_RATE; 
-}
-void DSPEngine::setMasterGain(float gain) { masterGain.store(gain, std::memory_order_relaxed); }
-int32_t DSPEngine::getActiveSubtitleIndex() const { return currentSubtitleIdx.load(std::memory_order_relaxed); }
+// --- The Unified Core Loop ---
+void DSPEngine::onAudioData(void* pOutput, const void* pInput, uint32_t frameCount) {
+    float tempBuffer[4096]; // Temp buffer for processing
+    const float* signalSource = nullptr;
 
-const char* DSPEngine::getSubtitleText(int32_t index) const {
-    if (index >= 0 && index < (int32_t)subtitles.size()) {
-        return subtitles[index].text.c_str();
+    if (currentMode == EngineMode::PLAYBACK) {
+        // Mode 1: Read from File -> Write to Speaker -> Analyze
+        ma_uint64 framesRead;
+        ma_decoder_read_pcm_frames(decoder, tempBuffer, frameCount, &framesRead);
+        
+        // Fill remaining with silence if EOF
+        if (framesRead < frameCount) {
+             // Loop or Stop? For now, silence.
+             memset(tempBuffer + framesRead, 0, (frameCount - framesRead) * sizeof(float));
+        }
+
+        // Output to hardware (Speakers)
+        memcpy(pOutput, tempBuffer, frameCount * sizeof(float));
+        signalSource = tempBuffer; // Analyze what we hear
+    } else {
+        // Mode 0: Read from Mic -> Analyze (No Output)
+        signalSource = (const float*)pInput;
     }
-    return "";
+
+    // Common Processing (RMS, FFT, Subtitles, Clock)
+    if (signalSource) {
+        processSignal(signalSource, frameCount);
+    }
 }
 
+void DSPEngine::processSignal(const float* buffer, uint32_t frames) {
+    float gain = masterGain.load(std::memory_order_relaxed);
+    
+    // Update Master Clock
+    uint64_t total = totalFramesProcessed.fetch_add(frames, std::memory_order_relaxed);
+    syncSubtitles((double)total / SAMPLE_RATE);
+
+    float sumSq = 0.0f;
+    for(uint32_t i=0; i<frames; ++i) {
+        float s = buffer[i] * gain; // Apply Gain
+        
+        // FFT & IIR
+        float f = s - prevInput + R * prevOutput;
+        prevInput = s; prevOutput = f;
+        sumSq += f*f;
+        
+        sampleBuffer[bufferIndex++] = f;
+        if(bufferIndex >= FFT_SIZE) {
+            computeFFT();
+            bufferIndex = 0;
+        }
+    }
+    currentRms.store(std::sqrt(sumSq/frames), std::memory_order_relaxed);
+}
+
+// ... (Rest of FFT and Subtitle logic remains exactly the same) ...
 void DSPEngine::loadSubtitles(const char* srtContent) {
-    // if (isRunning.load()) return; 
-
+     // Removed safety check per your request
     subtitles.clear();
     std::stringstream ss(srtContent);
     std::string line;
@@ -125,14 +185,10 @@ void DSPEngine::loadSubtitles(const char* srtContent) {
 
 void DSPEngine::syncSubtitles(double timestamp) {
     if (subtitles.empty()) return;
-
-    // Optimization: Check current index first
     int32_t current = currentSubtitleIdx.load(std::memory_order_relaxed);
     if (current >= 0 && current < (int32_t)subtitles.size()) {
         if (timestamp >= subtitles[current].startTime && timestamp <= subtitles[current].endTime) return;
     }
-
-    // Binary Search
     auto it = std::upper_bound(subtitles.begin(), subtitles.end(), timestamp, 
         [](double val, const SubtitleEvent& e) { return val < e.startTime; });
 
@@ -143,7 +199,6 @@ void DSPEngine::syncSubtitles(double timestamp) {
             found = (int32_t)std::distance(subtitles.begin(), candidate);
         }
     }
-    
     if (found != current) currentSubtitleIdx.store(found, std::memory_order_release);
 }
 
@@ -153,8 +208,6 @@ void DSPEngine::computeFFT() {
         float win = 0.5f * (1.0f - std::cos(2.0f * PI * i / (FFT_SIZE-1)));
         data[i] = std::complex<float>(sampleBuffer[i] * win, 0.0f);
     }
-    
-    // Standard Radix-2 Implementation
     for (int i=1, j=0; i<FFT_SIZE; i++) {
         int bit = FFT_SIZE >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
@@ -175,30 +228,28 @@ void DSPEngine::computeFFT() {
     for(int i=0; i<FFT_BINS; i++) fftMagnitudes[i] = std::abs(data[i]) / (FFT_SIZE/2.0f);
 }
 
-void DSPEngine::processAudio(float* input, uint32_t count) {
-    float gain = masterGain.load(std::memory_order_relaxed);
-    uint64_t total = totalFramesProcessed.fetch_add(count, std::memory_order_relaxed);
-    syncSubtitles((double)total / SAMPLE_RATE);
-    
-    float sumSq = 0.0f;
-    for(uint32_t i=0; i<count; ++i) {
-        float s = input[i] * gain;
-        float f = s - prevInput + R * prevOutput;
-        prevInput = s; prevOutput = f;
-        sumSq += f*f;
-        
-        sampleBuffer[bufferIndex++] = f;
-        if(bufferIndex >= FFT_SIZE) {
-            computeFFT();
-            bufferIndex = 0;
-        }
-    }
-    currentRms.store(std::sqrt(sumSq/count), std::memory_order_relaxed);
+// --- Getter Setters ---
+float DSPEngine::getRms() { return currentRms.load(std::memory_order_relaxed); }
+float* DSPEngine::getFftData() { return fftMagnitudes; }
+double DSPEngine::getCurrentTime() const { 
+    return (double)totalFramesProcessed.load(std::memory_order_relaxed) / (double)SAMPLE_RATE; 
+}
+void DSPEngine::setMasterGain(float gain) { masterGain.store(gain, std::memory_order_relaxed); }
+int32_t DSPEngine::getActiveSubtitleIndex() const { return currentSubtitleIdx.load(std::memory_order_relaxed); }
+const char* DSPEngine::getSubtitleText(int32_t index) const {
+    if (index >= 0 && index < (int32_t)subtitles.size()) return subtitles[index].text.c_str();
+    return "";
 }
 
-// --- Exports ---
-EXPORT void init_engine() { if (!global_engine) { global_engine = new DSPEngine(); global_engine->start(); } }
-EXPORT void stop_engine() { if (global_engine) { global_engine->stop(); delete global_engine; global_engine=nullptr; } }
+// --- EXPORTS ---
+EXPORT void init_engine(int mode, const char* file_path) {
+    if (!global_engine) global_engine = new DSPEngine();
+    // اگر فایل پث نال باشه و مد ۱ باشه، ارور میده داخلی ولی کرش نمیکنه
+    global_engine->start(mode, file_path);
+}
+EXPORT void stop_engine() {
+    if (global_engine) { global_engine->stop(); delete global_engine; global_engine = nullptr; }
+}
 EXPORT float get_rms_level() { return global_engine ? global_engine->getRms() : 0.0f; }
 EXPORT float* get_fft_array() { return global_engine ? global_engine->getFftData() : nullptr; }
 EXPORT void set_gain(float g) { if (global_engine) global_engine->setMasterGain(g); }

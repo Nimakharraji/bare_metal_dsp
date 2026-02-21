@@ -1,10 +1,11 @@
 import 'dart:ffi' as ffi;
 import 'dart:io';
-import 'package:ffi/ffi.dart'; // حتما باید پکیج ffi رو داشته باشی
+import 'package:ffi/ffi.dart';
 
-// --- FFI Signature Definitions (C++ Types) ---
-typedef InitEngineNative = ffi.Void Function();
-typedef InitEngineDart = void Function();
+// --- C++ Signatures (Updated) ---
+// الان init_engine دو ورودی دارد: Mode (int) و Path (char*)
+typedef InitEngineNative = ffi.Void Function(ffi.Int32 mode, ffi.Pointer<Utf8> path);
+typedef InitEngineDart = void Function(int mode, ffi.Pointer<Utf8> path);
 
 typedef StopEngineNative = ffi.Void Function();
 typedef StopEngineDart = void Function();
@@ -15,7 +16,6 @@ typedef GetRmsDart = double Function();
 typedef GetFftNative = ffi.Pointer<ffi.Float> Function();
 typedef GetFftDart = ffi.Pointer<ffi.Float> Function();
 
-// --- NEW CONTROLS ---
 typedef SetGainNative = ffi.Void Function(ffi.Float gain);
 typedef SetGainDart = void Function(double gain);
 
@@ -37,7 +37,6 @@ class DspBridge {
 
   late final ffi.DynamicLibrary _nativeLib;
   
-  // Private Native Function Pointers
   late final InitEngineDart _initEngineNative;
   late final StopEngineDart _stopEngineNative;
   late final GetRmsDart _getRmsLevelNative;
@@ -66,59 +65,46 @@ class DspBridge {
       }
     } catch (e) {
       print("CRITICAL ERROR LOADING DLL: $e");
-      // در محیط توسعه ممکنه هنوز DLL کپی نشده باشه، ارور رو چاپ میکنیم که کرش نکنه
       rethrow;
     }
   }
 
   void _bindSignatures() {
-    try {
-      _initEngineNative = _nativeLib.lookupFunction<InitEngineNative, InitEngineDart>('init_engine');
-      _stopEngineNative = _nativeLib.lookupFunction<StopEngineNative, StopEngineDart>('stop_engine');
-      _getRmsLevelNative = _nativeLib.lookupFunction<GetRmsNative, GetRmsDart>('get_rms_level');
-      _getFftArrayNative = _nativeLib.lookupFunction<GetFftNative, GetFftDart>('get_fft_array');
+    _initEngineNative = _nativeLib.lookupFunction<InitEngineNative, InitEngineDart>('init_engine');
+    _stopEngineNative = _nativeLib.lookupFunction<StopEngineNative, StopEngineDart>('stop_engine');
+    _getRmsLevelNative = _nativeLib.lookupFunction<GetRmsNative, GetRmsDart>('get_rms_level');
+    _getFftArrayNative = _nativeLib.lookupFunction<GetFftNative, GetFftDart>('get_fft_array');
+    _setGainNative = _nativeLib.lookupFunction<SetGainNative, SetGainDart>('set_gain');
+    _loadSubtitlesNative = _nativeLib.lookupFunction<LoadSubtitlesNative, LoadSubtitlesDart>('load_subtitles');
+    _getSubtitleIndexNative = _nativeLib.lookupFunction<GetSubIdxNative, GetSubIdxDart>('get_subtitle_index');
+    _getSubtitleTextNative = _nativeLib.lookupFunction<GetSubTextNative, GetSubTextDart>('get_subtitle_text');
+    _getMediaTimeNative = _nativeLib.lookupFunction<GetTimeNative, GetTimeDart>('get_media_time');
+  }
 
-      _setGainNative = _nativeLib.lookupFunction<SetGainNative, SetGainDart>('set_gain');
-      _loadSubtitlesNative = _nativeLib.lookupFunction<LoadSubtitlesNative, LoadSubtitlesDart>('load_subtitles');
-      _getSubtitleIndexNative = _nativeLib.lookupFunction<GetSubIdxNative, GetSubIdxDart>('get_subtitle_index');
-      _getSubtitleTextNative = _nativeLib.lookupFunction<GetSubTextNative, GetSubTextDart>('get_subtitle_text');
-      _getMediaTimeNative = _nativeLib.lookupFunction<GetTimeNative, GetTimeDart>('get_media_time');
-    } catch (e) {
-      print("ERROR BINDING FUNCTIONS: $e");
+  // --- PUBLIC API ---
+
+  // Updated Init: Accepts mode and optional file path
+  void initEngine({int mode = 0, String? filePath}) {
+    final ptr = (filePath != null) ? filePath.toNativeUtf8() : ffi.nullptr;
+    _initEngineNative(mode, ptr);
+    if (ptr != ffi.nullptr) {
+      calloc.free(ptr);
     }
   }
-
-  // --- PUBLIC SAFE API (Called by Bloc) ---
-
-  void initEngine() => _initEngineNative();
   
   void stopEngine() => _stopEngineNative();
-  
   double getRmsLevel() => _getRmsLevelNative();
-  
   ffi.Pointer<ffi.Float> getFftArray() => _getFftArrayNative();
+  void setGain(double gain) => _setGainNative(gain);
+  double getMediaTime() => _getMediaTimeNative();
+  int getSubtitleIndex() => _getSubtitleIndexNative();
 
-  void setGain(double gain) {
-    _setGainNative(gain);
-  }
-
-  // دریافت زمان دقیق از انجین
-  double getMediaTime() {
-    return _getMediaTimeNative();
-  }
-
-  // تبدیل استرینگ دارت به UTF8 برای C++
   void loadSubtitles(String srtContent) {
     final ptr = srtContent.toNativeUtf8();
     _loadSubtitlesNative(ptr);
-    calloc.free(ptr); // آزادسازی حافظه موقت
+    calloc.free(ptr);
   }
 
-  int getSubtitleIndex() {
-    return _getSubtitleIndexNative();
-  }
-
-  // تبدیل پوینتر C++ به استرینگ دارت
   String getSubtitleText(int index) {
     final ptr = _getSubtitleTextNative(index);
     if (ptr == ffi.nullptr) return "";
